@@ -2,10 +2,10 @@
 Label Region Extractor - Python Implementation
 Chuyển đổi từ C# LabelRegionExtractor.cs
 
-Hệ thống 3 tầng:
-- TẦNG 1: Analysis (phân tích độ tương phản)
-- TẦNG 2: Strategies (3 chiến lược: HIGH/MEDIUM/LOW)
-- Fallback Chain: MEDIUM→HIGH, LOW→MEDIUM→HIGH
+Hệ thống 2 tầng (đã cập nhật):
+- TẦNG 1: Analysis (phân tích histogram và contrast)
+- TẦNG 2: Strategies (2 chiến lược: HIGH/LOW)
+- Fallback Chain: HIGH→LOW, LOW→STOP
 """
 
 import cv2
@@ -17,21 +17,10 @@ from pathlib import Path
 import json
 
 # ============================================================================
-# CONSTANTS (từ C# LabelRegionExtractor.cs)
+# CONSTANTS
 # ============================================================================
 
-# Analysis thresholds
-HIGH_THRESHOLD = 0.45      # Nới rộng từ 0.6 → 0.45
-MEDIUM_THRESHOLD = 0.25    # Thu hẹp từ 0.3 → 0.25
-EDGE_MAX = 0.1             # Normalization cho edge strength
-
-# Label expansion ratios (cho Strategy LOW)
-# QR nằm ở GIỮA-PHẢI của nhãn (có padding cạnh phải và dưới)
-# Các ratios này chỉ dùng cho tham khảo, logic thực tế dùng expansion factors bên dưới
-LABEL_WIDTH_RATIO = 4.7     # Nhãn rộng ≈ 4.7× QR (3.5 trái + 1.0 QR + 0.2 phải = 4.7)
-LABEL_HEIGHT_RATIO = 3.2    # Nhãn cao ≈ 3.2× QR (1.0 trên + 1.0 QR + 1.2 dưới = 3.2)
-
-# Expansion factors (dựa trên vị trí CENTER-RIGHT)
+# Expansion factors (dựa trên vị trí CENTER-RIGHT của QR trong nhãn)
 QR_VERTICAL_CENTER_UP = 1.0      # Mở rộng 1.0× lên trên
 QR_VERTICAL_CENTER_DOWN = 1.2    # Mở rộng 1.2× xuống dưới (thêm 0.2× padding)
 QR_HORIZONTAL_RIGHT = 0.2        # Mở rộng 0.2× sang phải (thêm padding phải)
@@ -124,19 +113,18 @@ def save_debug_json(data: dict, filename: str):
 
 @dataclass
 class ContrastAnalysisResult:
-    """Kết quả phân tích độ tương phản."""
-    level: str  # 'High', 'Medium', 'Low'
+    """Kết quả phân tích độ tương phản (đã cập nhật)."""
+    level: str  # 'High' hoặc 'Low'
     final_score: float
     
-    # 3 metrics
+    # 2 metrics
     separation: float
-    edge_strength: float
     contrast_ratio: float
     
     # Debug info
     peak1_position: int
     peak2_position: int
-    edge_pixel_count: int
+    trough_position: int  # Ngưỡng đề xuất cho HIGH strategy
     mean_intensity: float
     stddev_intensity: float
 
@@ -145,9 +133,9 @@ class ContrastAnalysisResult:
 # TẦNG 1: ANALYSIS METHODS
 # ============================================================================
 
-def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, float]:
+def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, int, float]:
     """
-    Phân tích histogram để tìm 2 peaks chính và tính separation.
+    Phân tích histogram để tìm 2 peaks, 1 trough và tính separation.
     
     Logic:
     1. Lấy vùng phân tích (toàn bộ ảnh)
@@ -155,10 +143,11 @@ def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, float]:
     3. Smooth bằng moving average 5 bins
     4. Tìm local maxima (> 0.5 avgHeight, cách nhau >30 bins)
     5. Chọn 2 peaks cao nhất, sort theo position
-    6. separation = |peak2 - peak1| / 255.0
+    6. Tìm trough (điểm thấp nhất giữa 2 peaks)
+    7. separation = |peak2 - peak1| / 255.0
     
     Returns:
-        (peak1_pos, peak2_pos, separation)
+        (peak1_pos, peak2_pos, trough_pos, separation)
     """
     # 1. Lấy vùng phân tích
     analysis_roi = get_analysis_region(gray)
@@ -188,24 +177,46 @@ def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, float]:
             if not too_close:
                 peaks.append((i, smoothed[i]))
     
-    # 5. Take 2 highest peaks
-    if len(peaks) < 2:
-        peak1, peak2, separation = 0, 255, 0.0
-    else:
+    # 5. Take 2 highest peaks and find trough
+    peak1, peak2, trough_pos, separation = 0, 0, 127, 0.0
+    
+    if len(peaks) >= 2:
+        # Lấy 2 peaks cao nhất, sort theo vị trí
         peaks = sorted(peaks, key=lambda x: x[1], reverse=True)[:2]
-        peaks = sorted(peaks, key=lambda x: x[0])  # Sort by position
+        peaks = sorted(peaks, key=lambda x: x[0])
         
         peak1 = peaks[0][0]
         peak2 = peaks[1][0]
         separation = abs(peak2 - peak1) / 255.0
+        
+        # Tìm trough (điểm thấp nhất giữa 2 peaks)
+        if peak1 < peak2:
+            trough_pos = np.argmin(smoothed[peak1:peak2+1]) + peak1
+        else:
+            trough_pos = 127  # Fallback
+            
+    elif len(peaks) == 1:
+        # Nếu chỉ có 1 peak, set giá trị mặc định
+        peak1 = peaks[0][0]
+        peak2 = peak1
+        trough_pos = 127
+        separation = 0.0
+    else:
+        # Không có peak nào
+        peak1 = 0
+        peak2 = 255
+        trough_pos = 127
+        separation = 0.0
     
-    # Debug: Vẽ histogram với peaks (luôn vẽ dù có peaks hay không)
+    # Debug: Vẽ histogram với peaks và trough
     plt.figure(figsize=(12, 6))
     plt.subplot(1, 2, 1)
     plt.plot(hist, color='gray', alpha=0.5, label='Original')
     plt.plot(smoothed, color='blue', label='Smoothed')
     plt.axvline(peak1, color='red', linestyle='--', label=f'Peak1={peak1}')
     plt.axvline(peak2, color='green', linestyle='--', label=f'Peak2={peak2}')
+    plt.axvline(trough_pos, color='purple', linestyle=':', 
+                label=f'Trough={trough_pos} (Threshold)')
     plt.title(f'Histogram Analysis (Separation={separation:.3f})')
     plt.xlabel('Intensity')
     plt.ylabel('Frequency')
@@ -224,54 +235,10 @@ def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, float]:
     plt.close()
     print(f"  💾 Saved debug: {output_path}")
     
-    return (peak1, peak2, separation)
+    return (peak1, peak2, trough_pos, separation)
 
 
-def analyze_edges(gray: np.ndarray) -> Tuple[int, float]:
-    """
-    Phân tích edges bằng Canny để tính edge strength.
-    
-    Logic:
-    1. Lấy vùng phân tích (toàn bộ ảnh)
-    2. Canny(50, 150)
-    3. Đếm non-zero pixels
-    4. edge_strength = edge_pixels / total_pixels
-    
-    Returns:
-        (edge_pixels, edge_strength)
-    """
-    # 1. Lấy vùng phân tích
-    analysis_roi = get_analysis_region(gray)
-    
-    # 2. Canny Edge Detection
-    edges = cv2.Canny(analysis_roi, threshold1=50, threshold2=150)
-    
-    # 3. Count edge pixels
-    edge_pixels = cv2.countNonZero(edges)
-    total_pixels = analysis_roi.shape[0] * analysis_roi.shape[1]
-    
-    edge_strength = edge_pixels / total_pixels
-    
-    # Debug: Lưu ảnh edges
-    plt.figure(figsize=(12, 6))
-    plt.subplot(1, 2, 1)
-    plt.imshow(analysis_roi, cmap='gray')
-    plt.title('Original Image')
-    plt.axis('off')
-    
-    plt.subplot(1, 2, 2)
-    plt.imshow(edges, cmap='gray')
-    plt.title(f'Canny Edges (Strength={edge_strength:.4f}, {edge_pixels} pixels)')
-    plt.axis('off')
-    
-    plt.tight_layout()
-    output_path = Path(DEBUG_OUTPUT_DIR) / "debug_02_edges.png"
-    Path(DEBUG_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    plt.close()
-    print(f"  💾 Saved debug: {output_path}")
-    
-    return (edge_pixels, edge_strength)
+# analyze_edges() ĐÃ BỊ LOẠI BỎ
 
 
 def analyze_contrast(gray: np.ndarray) -> Tuple[float, float, float]:
@@ -342,55 +309,38 @@ def analyze_frame(gray: np.ndarray) -> ContrastAnalysisResult:
     """
     Phân tích frame để tính final score và xác định contrast level.
     
-    Logic từ C#:
-    1. Gọi 3 hàm phân tích
-    2. Normalize edge_strength (min(edge_strength / 0.1, 1.0))
-    3. Final Score = separationx0.4 + edge_strength_normx0.3 + contrast_ratiox0.3
-    4. Phân loại: >0.45=High, 0.25-0.45=Medium, <0.25=Low
+    Logic MỚI:
+    1. Gọi 2 hàm phân tích (histogram, contrast)
+    2. Final Score = separation * 0.6 + contrast_ratio * 0.4
+    3. Phân loại:
+       - High: separation > 0 VÀ final_score > 0.3
+       - Low: Các trường hợp còn lại
     
     Returns:
         ContrastAnalysisResult
     """
-    # 1. Call 3 analysis methods
-    peak1, peak2, separation = analyze_histogram(gray)
-    edge_pixels, edge_strength = analyze_edges(gray)
+    # 1. Call 2 analysis methods
+    peak1, peak2, trough_pos, separation = analyze_histogram(gray)
     mean, stddev, contrast_ratio = analyze_contrast(gray)
     
-    # 2. Normalize edge strength
-    edge_strength_norm = min(edge_strength / EDGE_MAX, 1.0)
+    # 2. Calculate Final Score (NEW LOGIC)
+    final_score = (separation * 0.6) + (contrast_ratio * 0.4)
     
-    # 3. Calculate Final Score
-    final_score = (separation * 0.4 + 
-                   edge_strength_norm * 0.3 + 
-                   contrast_ratio * 0.3)
-    
-    # ============================================================
-    # 🔧 DEBUG MODE: FORCE LOW STRATEGY
-    # Tạm thời force final_score = 0.01 để luôn chạy LOW strategy
-    # TODO: Xóa dòng này sau khi debug xong!
-    # ============================================================
-    final_score = 0.3
-    print("  ⚠️ DEBUG MODE: Forcing LOW strategy (final_score = 0.01)")
-    # ============================================================
-    
-    # 4. Determine level
-    if final_score > HIGH_THRESHOLD:
+    # 3. Determine level (NEW LOGIC)
+    if separation > 0 and final_score > 0.15:
         level = 'High'
-    elif final_score > MEDIUM_THRESHOLD:
-        level = 'Medium'
     else:
         level = 'Low'
     
-    # 5. Return result
+    # 4. Return result
     return ContrastAnalysisResult(
         level=level,
         final_score=final_score,
         separation=separation,
-        edge_strength=edge_strength,
         contrast_ratio=contrast_ratio,
         peak1_position=peak1,
         peak2_position=peak2,
-        edge_pixel_count=edge_pixels,
+        trough_position=trough_pos,
         mean_intensity=mean,
         stddev_intensity=stddev
     )
@@ -401,32 +351,30 @@ def analyze_frame(gray: np.ndarray) -> ContrastAnalysisResult:
 # ============================================================================
 
 def detect_with_high_contrast(src: np.ndarray, gray: np.ndarray, 
-                             threshold_value: int = 150) -> Tuple:
+                             threshold_value: int) -> Tuple:
     """
-    Strategy HIGH: Binary Threshold + Morphology (cho áo tối/màu đậm).
+    Strategy HIGH: Simple Binary Threshold + Morphology.
     
-    Logic từ C# (đã cập nhật):
-    1. Otsu adaptive threshold thay vì hardcoded value
+    Logic MỚI:
+    1. Simple Thresholding (dùng threshold_value từ trough)
     2. Morphology: Open(3x3, 1 iter) → Close(3x3, 2 iters)
     3. FindContours(EXTERNAL)
-    4. Chọn largest contour theo area
+    4. Chọn largest contour
     5. MinAreaRect → box
-    6. Crop bounding rect → QR verification
-    7. Trả về (rect, box, qr_text, qr_points_180, qr_points)
+    6. Crop → QR verification
     
     Returns:
         tuple: (rect, box, qr_text, qr_points_180, qr_points) or (None, None, None, None, None)
     """
-    print("  → Method: Binary Threshold + Morphology")
+    print(f"  → Method: Simple Threshold + Morphology (Threshold={threshold_value})")
     
     # Debug Step 0: Save input images
     save_debug_image(src, "high_00_input_src.png")
     save_debug_image(gray, "high_01_input_gray.png", cmap='gray')
     
-    # 1. Otsu adaptive threshold
-    otsu_threshold, binary = cv2.threshold(gray, 0, 255, 
-                                          cv2.THRESH_BINARY | cv2.THRESH_OTSU)
-    print(f"  → Otsu adaptive threshold: {otsu_threshold:.1f} (auto-calculated)")
+    # 1. Simple Binary Threshold (Thay thế Otsu)
+    _, binary = cv2.threshold(gray, threshold_value, 255, cv2.THRESH_BINARY)
+    print(f"  → Applied Simple Threshold: {threshold_value}")
     
     # Debug Step 1: Save binary threshold result
     save_debug_image(binary, "high_02_binary_threshold.png", cmap='gray')
@@ -546,157 +494,7 @@ def detect_with_high_contrast(src: np.ndarray, gray: np.ndarray,
     return (None, None, None, None, None)
 
 
-def detect_with_medium_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
-    """
-    Strategy MEDIUM: Canny Edge + Strong Morphology (cho áo màu nhạt).
-    
-    Logic từ C# (đã cập nhật):
-    1. Canny(30, 100) - Lower thresholds để nhạy hơn
-    2. Morphology: Close(7x7, 3 iters) → Dilate(7x7, 1 iter)
-    3. FindContours(EXTERNAL)
-    4. Filter CHỈ theo area ratio (5-80%)
-    5. Sort theo area (lớn nhất trước)
-    6. Loop candidates → verify QR → Early exit khi tìm thấy
-    
-    Returns:
-        tuple: (rect, box, qr_text, qr_points_180, qr_points) or (None, None, None, None, None)
-    """
-    print("  → Method: Canny Edge + Strong Morphology")
-    
-    # Debug Step 0: Save input images
-    save_debug_image(src, "medium_00_input_src.png")
-    save_debug_image(gray, "medium_01_input_gray.png", cmap='gray')
-    
-    # 1. Canny with lower thresholds
-    edges = cv2.Canny(gray, threshold1=30, threshold2=100)
-    print("  → Lower Canny thresholds (30/100) for better edge detection")
-    
-    # Debug Step 1: Save Canny edges
-    save_debug_image(edges, "medium_02_canny_edges.png", cmap='gray')
-    
-    # 2. Strong morphology
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
-    
-    # Debug Step 2a: Save after CLOSE operation
-    save_debug_image(edges_closed, "medium_03_morph_close.png", cmap='gray')
-    
-    edges = cv2.dilate(edges_closed, kernel, iterations=1)
-    
-    # Debug Step 2b: Save after DILATE operation
-    save_debug_image(edges, "medium_04_morph_dilate.png", cmap='gray')
-    
-    # 3. Find contours
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, 
-                                   cv2.CHAIN_APPROX_SIMPLE)
-    
-    if len(contours) == 0:
-        print("  ✗ No contours found")
-        return (None, None, None, None, None)
-    
-    print(f"  → Found {len(contours)} contours")
-    
-    # Debug Step 3: Visualize all contours
-    debug_contours = src.copy()
-    cv2.drawContours(debug_contours, contours, -1, (0, 255, 0), 2)
-    save_debug_image(debug_contours, "medium_05_all_contours.png")
-    
-    # 4. Filter by area ratio (5-80%)
-    roi_area = gray.shape[0] * gray.shape[1]
-    candidates = []
-    
-    for c in contours:
-        area = cv2.contourArea(c)
-        area_ratio = area / roi_area
-        
-        if 0.05 <= area_ratio <= 0.80:
-            rect = cv2.minAreaRect(c)
-            candidates.append((c, rect, area))
-    
-    # 5. Sort by area (largest first)
-    candidates = sorted(candidates, key=lambda x: x[2], reverse=True)
-    print(f"  → {len(candidates)} candidates after filtering (area 5-80%)")
-    
-    # Debug Step 4: Visualize filtered candidates
-    if len(candidates) > 0:
-        debug_candidates = src.copy()
-        for i, (contour, rect, area) in enumerate(candidates[:5]):  # Top 5 candidates
-            color = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)][i % 5]
-            cv2.drawContours(debug_candidates, [contour], -1, color, 2)
-            # Add label
-            M = cv2.moments(contour)
-            if M["m00"] != 0:
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                cv2.putText(debug_candidates, f"#{i+1}: {area:.0f}px", (cx - 50, cy), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-        save_debug_image(debug_candidates, "medium_06_filtered_candidates.png")
-    
-    # 6. Loop and verify QR (Early Exit)
-    for idx, (contour, rect, area) in enumerate(candidates):
-        bound = cv2.boundingRect(contour)
-        x, y, w, h = bound
-        
-        # Clamp to bounds
-        x = max(0, x)
-        y = max(0, y)
-        w = min(src.shape[1] - x, w)
-        h = min(src.shape[0] - y, h)
-        
-        if w <= 0 or h <= 0:
-            continue
-        
-        label_roi = src[y:y+h, x:x+w]
-        
-        # Debug Step 5: Save each candidate ROI being tested
-        save_debug_image(label_roi, f"medium_07_candidate_{idx+1}_roi.png")
-        
-        # QR detection
-        qr_detector = cv2.QRCodeDetector()
-        qr_text, qr_points_180, _ = qr_detector.detectAndDecode(label_roi)
-        
-        qr_points = None
-        if qr_points_180 is not None and len(qr_points_180) > 0:
-            if qr_points_180.ndim == 3:
-                qr_points_180 = qr_points_180.reshape(-1, 2)
-            
-            qr_points = qr_points_180.copy()
-            qr_points[:, 0] += x
-            qr_points[:, 1] += y
-        
-        if qr_text:
-            box = cv2.boxPoints(rect)
-            box = np.int32(box)
-            print(f"  ✓ QR detected in candidate (area={area:.0f}): {qr_text}")
-            
-            # Debug Step 6: Visualize successful candidate with QR
-            debug_success = label_roi.copy()
-            if qr_points_180 is not None:
-                qr_box_int = qr_points_180.astype(np.int32)
-                cv2.polylines(debug_success, [qr_box_int], True, (0, 255, 0), 2)
-                for i, pt in enumerate(qr_points_180):
-                    pt_int = tuple(pt.astype(int))
-                    cv2.circle(debug_success, pt_int, 5, (0, 0, 255), -1)
-            save_debug_image(debug_success, f"medium_08_candidate_{idx+1}_qr_detected.png")
-            
-            # Debug Step 7: Final result on original image
-            debug_final = src.copy()
-            # Draw label box (blue)
-            cv2.drawContours(debug_final, [box], 0, (255, 0, 0), 3)
-            # Draw QR box (green)
-            if qr_points is not None:
-                qr_box_global = qr_points.astype(np.int32)
-                cv2.polylines(debug_final, [qr_box_global], True, (0, 255, 0), 2)
-                # Add QR text
-                qr_center = qr_points.mean(axis=0).astype(int)
-                cv2.putText(debug_final, f"QR: {qr_text}", (qr_center[0] - 50, qr_center[1] - 10), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            save_debug_image(debug_final, "medium_09_final_result.png")
-            
-            return (rect, box, qr_text, qr_points_180, qr_points)
-    
-    print("  ✗ No QR found in any candidate")
-    return (None, None, None, None, None)
+# detect_with_medium_contrast() ĐÃ BỊ LOẠI BỎ
 
 
 def debug_low_strategy_geometry(src: np.ndarray, qr_points: np.ndarray, 
@@ -967,116 +765,99 @@ def detect_with_low_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
 # ============================================================================
 
 def detect_label_region(src: np.ndarray, 
-                       threshold_value: int = 150) -> Tuple[Optional[Tuple], 
-                                                            Optional[np.ndarray], 
-                                                            Optional[str],
-                                                            Optional[np.ndarray],
-                                                            Optional[np.ndarray],
-                                                            Optional[str]]:
+                       **kwargs) -> Tuple[Optional[Tuple], 
+                                          Optional[np.ndarray], 
+                                          Optional[str],
+                                          Optional[np.ndarray],
+                                          Optional[np.ndarray],
+                                          Optional[str]]:
     """
     Phát hiện vùng nhãn trong ảnh.
     
-    Logic từ C# (flow chính xác):
+    Logic CHÍNH XÁC:
     1. Preprocessing: BGR → Gray → GaussianBlur(5x5)
-    2. TẦNG 1: Phân tích (AnalyzeFrame) → ContrastAnalysisResult
-    3. Log analysis metrics
-    4. TẦNG 2: Routing theo level:
-       - HIGH: DetectWithHighContrast()
-       - MEDIUM: DetectWithMediumContrast() → fallback to HIGH
-       - LOW: Apply CLAHE → DetectWithLowContrast() → fallback chain (→MEDIUM→HIGH)
-    5. Trả về (rect, box, qr_text, qr_points_180, qr_points, strategy_used)
+    2. TẦNG 1: Phân tích (AnalyzeFrame) → High/Low, trough_pos
+    3. TẦNG 2: Routing:
+       - HIGH: Thử detect_with_high_contrast()
+               → Nếu thất bại, fallback sang detect_with_low_contrast()
+       - LOW:  Thử detect_with_low_contrast()
+               → Nếu thất bại, DỪNG LẠI (không fallback).
     
     Args:
         src: BGR image (np.ndarray)
-        threshold_value: Threshold cho binary (không dùng nữa vì Otsu adaptive)
     
     Returns:
         tuple: (rect, box, qr_text, qr_points_180, qr_points, strategy_used)
-               hoặc (None, None, None, None, None, None) nếu thất bại
+               hoặc (None, None, None, None, None, "FAILED") nếu thất bại
     """
     if src is None or src.size == 0:
         return (None, None, None, None, None, None)
     
     try:
         # 1. PREPROCESSING
-        gray = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        gray_blurred = cv2.cvtColor(src, cv2.COLOR_BGR2GRAY)
+        gray_blurred = cv2.GaussianBlur(gray_blurred, (5, 5), 0)
         
-        # 2. TẦNG 1: Phân tích
-        analysis = analyze_frame(gray)
+        # 2. TẦNG 1: Phân tích (dùng ảnh đã blur)
+        analysis = analyze_frame(gray_blurred)
         
         # 3. Log analysis
         print("╔════════════════════════════════════════════════════════════════╗")
         print("║           FRAME ANALYSIS - AUTO CONTRAST DETECTION            ║")
         print("╠════════════════════════════════════════════════════════════════╣")
         print(f"║  📊 Final Score:     {analysis.final_score:6.3f}                              ║")
-        print(f"║  🎯 Strategy Level:  {analysis.level:<10}                        ║")
+        print(f"║  🎯 Strategy Level:  {analysis.level:<10} (Primary)                 ║")
         print("╠════════════════════════════════════════════════════════════════╣")
         print("║  METRICS BREAKDOWN:                                            ║")
-        print(f"║    • Separation:     {analysis.separation:6.3f}  (peaks: {analysis.peak1_position:3}, {analysis.peak2_position:3})       ║")
-        print(f"║    • Edge Strength:  {analysis.edge_strength:6.3f}  ({analysis.edge_pixel_count:5} pixels)         ║")
+        print(f"║    • Separation:     {analysis.separation:6.3f}  (P1:{analysis.peak1_position:3}, P2:{analysis.peak2_position:3})     ║")
         print(f"║    • Contrast Ratio: {analysis.contrast_ratio:6.3f}  (σ={analysis.stddev_intensity:6.1f})           ║")
+        print(f"║    • HIGH Threshold: {analysis.trough_position:<6} (Trough)                      ║")
         print("╚════════════════════════════════════════════════════════════════╝")
         
-        # 4. TẦNG 2: Routing và Fallback
+        # 4. TẦNG 2: Routing và Fallback (Logic chính xác)
         result = None
         strategy_used = ""
         
         if analysis.level == 'High':
-            print("🟢 Executing Strategy: HIGH CONTRAST")
-            result = detect_with_high_contrast(src, gray, threshold_value)
+            print("🟢 Executing Strategy: HIGH CONTRAST (Primary)")
+            # Thử HIGH trước
+            result = detect_with_high_contrast(src, gray_blurred, analysis.trough_position)
             print(f"   Result: {'✅ SUCCESS' if result[0] is not None else '❌ FAILED'}")
+            
             if result[0] is not None:
                 strategy_used = "HIGH"
-        
-        elif analysis.level == 'Medium':
-            print("🟡 Executing Strategy: MEDIUM CONTRAST")
-            result = detect_with_medium_contrast(src, gray)
-            print(f"   Result: {'✅ SUCCESS' if result[0] is not None else '❌ FAILED'}")
-            
-            if result[0] is not None:
-                strategy_used = "MEDIUM"
             else:
-                # Fallback to HIGH
-                print("⚠️  MEDIUM failed, falling back to HIGH strategy...")
-                result = detect_with_high_contrast(src, gray, threshold_value)
+                # Fallback sang LOW
+                print("⚠️  HIGH failed, falling back to LOW strategy...")
+                
+                # Chuẩn bị ảnh cho LOW (cần CLAHE)
+                clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                gray_clahe = clahe.apply(gray_blurred)
+                print("  → Applied CLAHE preprocessing for fallback")
+                
+                result = detect_with_low_contrast(src, gray_clahe)
                 print(f"   Fallback Result: {'✅ SUCCESS' if result[0] is not None else '❌ FAILED'}")
                 if result[0] is not None:
-                    strategy_used = "MEDIUM→HIGH"
+                    strategy_used = "HIGH→LOW"
         
-        elif analysis.level == 'Low':
-            print("🔴 Executing Strategy: LOW CONTRAST (QR-First)")
+        else: # (analysis.level == 'Low')
+            print("🔴 Executing Strategy: LOW CONTRAST (Primary)")
             
-            # Apply CLAHE preprocessing (như trong C#)
+            # Chuẩn bị ảnh cho LOW (cần CLAHE)
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            gray = clahe.apply(gray)
+            gray_clahe = clahe.apply(gray_blurred)
             print("  → Applied CLAHE preprocessing (adaptive contrast enhancement)")
             
-            result = detect_with_low_contrast(src, gray)
+            # Thử LOW
+            result = detect_with_low_contrast(src, gray_clahe)
             print(f"   Result: {'✅ SUCCESS' if result[0] is not None else '❌ FAILED'}")
             
             if result[0] is not None:
                 strategy_used = "LOW"
             else:
-                # Fallback to MEDIUM
-                print("⚠️  LOW failed, falling back to MEDIUM strategy...")
-                result = detect_with_medium_contrast(src, gray)
-                print(f"   Fallback Result: {'✅ SUCCESS' if result[0] is not None else '❌ FAILED'}")
-                
-                if result[0] is not None:
-                    strategy_used = "LOW→MEDIUM"
-                else:
-                    # Fallback to HIGH
-                    print("⚠️  MEDIUM failed, falling back to HIGH strategy...")
-                    result = detect_with_high_contrast(src, gray, threshold_value)
-                    print(f"   Final Fallback Result: {'✅ SUCCESS' if result[0] is not None else '❌ FAILED'}")
-                    if result[0] is not None:
-                        strategy_used = "LOW→MEDIUM→HIGH"
-        
-        else:
-            print("❌ ERROR: Unknown contrast level")
-            result = (None, None, None, None, None)
-            strategy_used = "ERROR"
+                # KHÔNG FALLBACK
+                print("⚠️  LOW failed. No fallback (Histogram not separable).")
+                # strategy_used sẽ rỗng, và sẽ được gán là "FAILED" ở dưới
         
         # 5. Log final result
         if result[0] is not None:
@@ -1084,10 +865,17 @@ def detect_label_region(src: np.ndarray,
             print(f"✅ FINAL RESULT: Label detected | QR: {qr_text} | Strategy: {strategy_used}")
         else:
             print("❌ FINAL RESULT: Label NOT detected")
+            # Gán strategy_used = "FAILED" nếu không có kết quả nào
+            strategy_used = strategy_used if strategy_used else "FAILED"
+            
         print("")
         
         # 6. Return with strategy_used
-        return (*result, strategy_used)
+        # Đảm bảo trả về 6 giá trị
+        if result[0] is not None:
+            return (*result, strategy_used)
+        else:
+            return (None, None, None, None, None, "FAILED")
     
     except Exception as e:
         print(f"[DetectLabelRegion ERROR] {e}")
