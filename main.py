@@ -165,4 +165,4 @@ Examples:
 
 
 if __name__ == "__main__":
-    main("data/test_images/012-white-guide-box.png", "data/results")
+    main("data/test_images/004-white-guide-box.png", "data/results")
