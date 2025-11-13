@@ -38,7 +38,7 @@ QR_HORIZONTAL_RIGHT = 0.2        # Mở rộng 0.2× sang phải (thêm padding 
 QR_LEFT_EXPANSION = 3.5          # Mở rộng 3.5× sang trái
 
 # Padding để tránh cắt nhầm (tùy chọn)
-PADDING_RATIO = 0.2              # 20% padding chung cho tất cả các cạnh (dựa trên kích thước QR)
+PADDING_RATIO = 0.1              # 10% padding chung cho tất cả các cạnh (dựa trên kích thước QR)
 
 # Debug output directory
 DEBUG_OUTPUT_DIR = "data/debug"
@@ -369,7 +369,7 @@ def analyze_frame(gray: np.ndarray) -> ContrastAnalysisResult:
     # Tạm thời force final_score = 0.01 để luôn chạy LOW strategy
     # TODO: Xóa dòng này sau khi debug xong!
     # ============================================================
-    final_score = 0.01
+    final_score = 0.3
     print("  ⚠️ DEBUG MODE: Forcing LOW strategy (final_score = 0.01)")
     # ============================================================
     
@@ -419,15 +419,29 @@ def detect_with_high_contrast(src: np.ndarray, gray: np.ndarray,
     """
     print("  → Method: Binary Threshold + Morphology")
     
+    # Debug Step 0: Save input images
+    save_debug_image(src, "high_00_input_src.png")
+    save_debug_image(gray, "high_01_input_gray.png", cmap='gray')
+    
     # 1. Otsu adaptive threshold
     otsu_threshold, binary = cv2.threshold(gray, 0, 255, 
                                           cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     print(f"  → Otsu adaptive threshold: {otsu_threshold:.1f} (auto-calculated)")
     
+    # Debug Step 1: Save binary threshold result
+    save_debug_image(binary, "high_02_binary_threshold.png", cmap='gray')
+    
     # 2. Morphology
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    morph = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
-    morph = cv2.morphologyEx(morph, cv2.MORPH_CLOSE, kernel, iterations=2)
+    morph_open = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    
+    # Debug Step 2a: Save after OPEN operation
+    save_debug_image(morph_open, "high_03_morph_open.png", cmap='gray')
+    
+    morph = cv2.morphologyEx(morph_open, cv2.MORPH_CLOSE, kernel, iterations=2)
+    
+    # Debug Step 2b: Save after CLOSE operation
+    save_debug_image(morph, "high_04_morph_close.png", cmap='gray')
     
     # 3. Find contours
     contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, 
@@ -439,15 +453,35 @@ def detect_with_high_contrast(src: np.ndarray, gray: np.ndarray,
     
     print(f"  → Found {len(contours)} contours")
     
+    # Debug Step 3: Visualize all contours
+    debug_contours = src.copy()
+    cv2.drawContours(debug_contours, contours, -1, (0, 255, 0), 2)
+    save_debug_image(debug_contours, "high_05_all_contours.png")
+    
     # 4. Find largest contour
     biggest = max(contours, key=cv2.contourArea)
     max_area = cv2.contourArea(biggest)
     print(f"  → Largest contour area: {max_area:.0f} pixels")
     
+    # Debug Step 4: Visualize largest contour
+    debug_largest = src.copy()
+    cv2.drawContours(debug_largest, [biggest], -1, (0, 0, 255), 3)
+    save_debug_image(debug_largest, "high_06_largest_contour.png")
+    
     # 5. MinAreaRect
     rect = cv2.minAreaRect(biggest)
     box = cv2.boxPoints(rect)
     box = np.int32(box)
+    
+    # Debug Step 5: Visualize MinAreaRect
+    debug_rect = src.copy()
+    cv2.drawContours(debug_rect, [box], 0, (255, 0, 0), 3)
+    # Add corner labels
+    for i, pt in enumerate(box):
+        cv2.circle(debug_rect, tuple(pt), 8, (255, 255, 0), -1)
+        cv2.putText(debug_rect, f"{i}", (pt[0] + 10, pt[1] + 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+    save_debug_image(debug_rect, "high_07_min_area_rect.png")
     
     # 6. Crop and verify QR
     bound = cv2.boundingRect(biggest)
@@ -460,6 +494,9 @@ def detect_with_high_contrast(src: np.ndarray, gray: np.ndarray,
     h = min(src.shape[0] - y, h)
     
     label_roi = src[y:y+h, x:x+w]
+    
+    # Debug Step 6: Save cropped label ROI
+    save_debug_image(label_roi, "high_08_label_roi.png")
     
     # QR detection
     qr_detector = cv2.QRCodeDetector()
@@ -475,9 +512,34 @@ def detect_with_high_contrast(src: np.ndarray, gray: np.ndarray,
         qr_points = qr_points_180.copy()
         qr_points[:, 0] += x
         qr_points[:, 1] += y
+        
+        # Debug Step 7: Visualize QR code detection on ROI
+        debug_qr_roi = label_roi.copy()
+        qr_box_int = qr_points_180.astype(np.int32)
+        cv2.polylines(debug_qr_roi, [qr_box_int], True, (0, 255, 0), 2)
+        for i, pt in enumerate(qr_points_180):
+            pt_int = tuple(pt.astype(int))
+            cv2.circle(debug_qr_roi, pt_int, 5, (0, 0, 255), -1)
+            cv2.putText(debug_qr_roi, f"QR{i}", (pt_int[0] + 10, pt_int[1] + 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        save_debug_image(debug_qr_roi, "high_09_qr_detected_roi.png")
     
     if qr_text:
         print(f"  ✓ QR detected: {qr_text}")
+        
+        # Debug Step 8: Final result with both label box and QR on original image
+        debug_final = src.copy()
+        # Draw label box (blue)
+        cv2.drawContours(debug_final, [box], 0, (255, 0, 0), 3)
+        # Draw QR box (green) if available
+        if qr_points is not None:
+            qr_box_global = qr_points.astype(np.int32)
+            cv2.polylines(debug_final, [qr_box_global], True, (0, 255, 0), 2)
+            # Add QR text
+            qr_center = qr_points.mean(axis=0).astype(int)
+            cv2.putText(debug_final, f"QR: {qr_text}", (qr_center[0] - 50, qr_center[1] - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        save_debug_image(debug_final, "high_10_final_result.png")
         return (rect, box, qr_text, qr_points_180, qr_points)
     
     print("  ✗ No QR code found in label region")
@@ -501,14 +563,28 @@ def detect_with_medium_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     """
     print("  → Method: Canny Edge + Strong Morphology")
     
+    # Debug Step 0: Save input images
+    save_debug_image(src, "medium_00_input_src.png")
+    save_debug_image(gray, "medium_01_input_gray.png", cmap='gray')
+    
     # 1. Canny with lower thresholds
     edges = cv2.Canny(gray, threshold1=30, threshold2=100)
     print("  → Lower Canny thresholds (30/100) for better edge detection")
     
+    # Debug Step 1: Save Canny edges
+    save_debug_image(edges, "medium_02_canny_edges.png", cmap='gray')
+    
     # 2. Strong morphology
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
-    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
-    edges = cv2.dilate(edges, kernel, iterations=1)
+    edges_closed = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel, iterations=3)
+    
+    # Debug Step 2a: Save after CLOSE operation
+    save_debug_image(edges_closed, "medium_03_morph_close.png", cmap='gray')
+    
+    edges = cv2.dilate(edges_closed, kernel, iterations=1)
+    
+    # Debug Step 2b: Save after DILATE operation
+    save_debug_image(edges, "medium_04_morph_dilate.png", cmap='gray')
     
     # 3. Find contours
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, 
@@ -519,6 +595,11 @@ def detect_with_medium_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
         return (None, None, None, None, None)
     
     print(f"  → Found {len(contours)} contours")
+    
+    # Debug Step 3: Visualize all contours
+    debug_contours = src.copy()
+    cv2.drawContours(debug_contours, contours, -1, (0, 255, 0), 2)
+    save_debug_image(debug_contours, "medium_05_all_contours.png")
     
     # 4. Filter by area ratio (5-80%)
     roi_area = gray.shape[0] * gray.shape[1]
@@ -536,8 +617,23 @@ def detect_with_medium_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     candidates = sorted(candidates, key=lambda x: x[2], reverse=True)
     print(f"  → {len(candidates)} candidates after filtering (area 5-80%)")
     
+    # Debug Step 4: Visualize filtered candidates
+    if len(candidates) > 0:
+        debug_candidates = src.copy()
+        for i, (contour, rect, area) in enumerate(candidates[:5]):  # Top 5 candidates
+            color = [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)][i % 5]
+            cv2.drawContours(debug_candidates, [contour], -1, color, 2)
+            # Add label
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                cv2.putText(debug_candidates, f"#{i+1}: {area:.0f}px", (cx - 50, cy), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        save_debug_image(debug_candidates, "medium_06_filtered_candidates.png")
+    
     # 6. Loop and verify QR (Early Exit)
-    for contour, rect, area in candidates:
+    for idx, (contour, rect, area) in enumerate(candidates):
         bound = cv2.boundingRect(contour)
         x, y, w, h = bound
         
@@ -551,6 +647,9 @@ def detect_with_medium_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
             continue
         
         label_roi = src[y:y+h, x:x+w]
+        
+        # Debug Step 5: Save each candidate ROI being tested
+        save_debug_image(label_roi, f"medium_07_candidate_{idx+1}_roi.png")
         
         # QR detection
         qr_detector = cv2.QRCodeDetector()
@@ -569,6 +668,31 @@ def detect_with_medium_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
             box = cv2.boxPoints(rect)
             box = np.int32(box)
             print(f"  ✓ QR detected in candidate (area={area:.0f}): {qr_text}")
+            
+            # Debug Step 6: Visualize successful candidate with QR
+            debug_success = label_roi.copy()
+            if qr_points_180 is not None:
+                qr_box_int = qr_points_180.astype(np.int32)
+                cv2.polylines(debug_success, [qr_box_int], True, (0, 255, 0), 2)
+                for i, pt in enumerate(qr_points_180):
+                    pt_int = tuple(pt.astype(int))
+                    cv2.circle(debug_success, pt_int, 5, (0, 0, 255), -1)
+            save_debug_image(debug_success, f"medium_08_candidate_{idx+1}_qr_detected.png")
+            
+            # Debug Step 7: Final result on original image
+            debug_final = src.copy()
+            # Draw label box (blue)
+            cv2.drawContours(debug_final, [box], 0, (255, 0, 0), 3)
+            # Draw QR box (green)
+            if qr_points is not None:
+                qr_box_global = qr_points.astype(np.int32)
+                cv2.polylines(debug_final, [qr_box_global], True, (0, 255, 0), 2)
+                # Add QR text
+                qr_center = qr_points.mean(axis=0).astype(int)
+                cv2.putText(debug_final, f"QR: {qr_text}", (qr_center[0] - 50, qr_center[1] - 10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            save_debug_image(debug_final, "medium_09_final_result.png")
+            
             return (rect, box, qr_text, qr_points_180, qr_points)
     
     print("  ✗ No QR found in any candidate")
