@@ -69,8 +69,11 @@ def visualize_result(src: np.ndarray, result: tuple) -> np.ndarray:
         cv2.polylines(vis, [qr_box], True, (0, 0, 255), 2)
     
     # Draw info text
+    # Thay thế các ký tự Unicode không hỗ trợ bằng ASCII
+    strategy_display = strategy_used.replace('→', '->')
+    
     info_lines = [
-        f"Strategy: {strategy_used}",
+        f"Strategy: {strategy_display}",
         f"QR: {qr_text if qr_text else 'N/A'}"
     ]
     
@@ -85,7 +88,7 @@ def visualize_result(src: np.ndarray, result: tuple) -> np.ndarray:
         center = (int(rect[0][0]), int(rect[0][1]))
         angle = rect[2]
         cv2.circle(vis, center, 3, (255, 0, 255), -1)
-        cv2.putText(vis, f"Angle: {angle:.1f}°", 
+        cv2.putText(vis, f"Angle: {angle:.1f}", 
                    (10, vis.shape[0] - 20),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
     
@@ -162,4 +165,4 @@ Examples:
 
 
 if __name__ == "__main__":
-    main("data/test_images/002-white-guide-box.png", "data/results")
+    main("data/test_images/009-orange-guide-box.png", "data/results")

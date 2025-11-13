@@ -26,8 +26,19 @@ MEDIUM_THRESHOLD = 0.25    # Thu hẹp từ 0.3 → 0.25
 EDGE_MAX = 0.1             # Normalization cho edge strength
 
 # Label expansion ratios (cho Strategy LOW)
-LABEL_WIDTH_RATIO = 4.0    # Giảm từ 9.0 → 4.0
-LABEL_HEIGHT_RATIO = 3.0   # Giữ nguyên 3×
+# QR nằm ở GIỮA-PHẢI của nhãn (có padding cạnh phải và dưới)
+# Các ratios này chỉ dùng cho tham khảo, logic thực tế dùng expansion factors bên dưới
+LABEL_WIDTH_RATIO = 4.7     # Nhãn rộng ≈ 4.7× QR (3.5 trái + 1.0 QR + 0.2 phải = 4.7)
+LABEL_HEIGHT_RATIO = 3.2    # Nhãn cao ≈ 3.2× QR (1.0 trên + 1.0 QR + 1.2 dưới = 3.2)
+
+# Expansion factors (dựa trên vị trí CENTER-RIGHT)
+QR_VERTICAL_CENTER_UP = 1.0      # Mở rộng 1.0× lên trên
+QR_VERTICAL_CENTER_DOWN = 1.2    # Mở rộng 1.2× xuống dưới (thêm 0.2× padding)
+QR_HORIZONTAL_RIGHT = 0.2        # Mở rộng 0.2× sang phải (thêm padding phải)
+QR_LEFT_EXPANSION = 3.5          # Mở rộng 3.5× sang trái
+
+# Padding để tránh cắt nhầm (tùy chọn)
+PADDING_RATIO = 0.2              # 20% padding chung cho tất cả các cạnh (dựa trên kích thước QR)
 
 # Debug output directory
 DEBUG_OUTPUT_DIR = "data/debug"
@@ -353,6 +364,15 @@ def analyze_frame(gray: np.ndarray) -> ContrastAnalysisResult:
                    edge_strength_norm * 0.3 + 
                    contrast_ratio * 0.3)
     
+    # ============================================================
+    # 🔧 DEBUG MODE: FORCE LOW STRATEGY
+    # Tạm thời force final_score = 0.01 để luôn chạy LOW strategy
+    # TODO: Xóa dòng này sau khi debug xong!
+    # ============================================================
+    final_score = 0.01
+    print("  ⚠️ DEBUG MODE: Forcing LOW strategy (final_score = 0.01)")
+    # ============================================================
+    
     # 4. Determine level
     if final_score > HIGH_THRESHOLD:
         level = 'High'
@@ -555,17 +575,156 @@ def detect_with_medium_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     return (None, None, None, None, None)
 
 
+def debug_low_strategy_geometry(src: np.ndarray, qr_points: np.ndarray, 
+                                box: np.ndarray, p1: np.ndarray, p2: np.ndarray,
+                                label_top_right: np.ndarray, label_top_left: np.ndarray,
+                                expansion_up: float, expansion_left: float):
+    """
+    Debug visualization cho LOW strategy geometry.
+    Vẽ QR box, label box, và các vectors mở rộng.
+    
+    Args:
+        src: Ảnh gốc
+        qr_points: 4 điểm QR code
+        box: 4 góc label đã tính
+        p1, p2: Điểm QR top-right và bottom-right
+        label_top_right, label_top_left: Góc label
+        expansion_up, expansion_left: Khoảng mở rộng
+    """
+    debug_vis = src.copy()
+    
+    # Vẽ QR box (đỏ)
+    qr_box_int = qr_points.astype(np.int32)
+    cv2.polylines(debug_vis, [qr_box_int], True, (0, 0, 255), 2)
+    
+    # Vẽ label box (xanh lá)
+    cv2.polylines(debug_vis, [box], True, (0, 255, 0), 3)
+    
+    # Vẽ 4 góc QR (đỏ)
+    for i, pt in enumerate(qr_points):
+        pt_int = tuple(pt.astype(int))
+        cv2.circle(debug_vis, pt_int, 5, (0, 0, 255), -1)
+        cv2.putText(debug_vis, f"QR{i}", (pt_int[0] + 10, pt_int[1] + 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+    
+    # Vẽ 4 góc label (xanh lá)
+    label_names = ["L0:TL", "L1:TR", "L2:BR", "L3:BL"]  # TL=top-left, TR=top-right, etc.
+    for i, pt in enumerate(box):
+        cv2.circle(debug_vis, tuple(pt), 8, (0, 255, 0), -1)
+        cv2.putText(debug_vis, label_names[i], (pt[0] + 10, pt[1] + 10), 
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    
+    # Vẽ expansion vectors (màu vàng)
+    # p1 -> label_top_right (expand UP)
+    cv2.arrowedLine(debug_vis, tuple(p1.astype(int)), 
+                   tuple(label_top_right.astype(int)), (0, 255, 255), 2)
+    mid_pt = ((p1 + label_top_right) / 2).astype(int)
+    cv2.putText(debug_vis, f"up:{expansion_up:.0f}px", tuple(mid_pt), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
+    
+    # label_top_right -> label_top_left (expand LEFT)
+    cv2.arrowedLine(debug_vis, tuple(label_top_right.astype(int)), 
+                   tuple(label_top_left.astype(int)), (255, 255, 0), 2)
+    mid_pt = ((label_top_right + label_top_left) / 2).astype(int)
+    cv2.putText(debug_vis, f"left:{expansion_left:.0f}px", tuple(mid_pt), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+    
+    # Thêm text thông tin
+    info_y = 30
+    cv2.putText(debug_vis, "LOW Strategy Geometry Debug", (10, info_y), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 255), 2)
+    info_y += 30
+    cv2.putText(debug_vis, "Red: QR box | Green: Label box", (10, info_y), 
+               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+    
+    save_debug_image(debug_vis, "05_low_geometry_debug.png")
+    print(f"  💾 Debug geometry visualization saved")
+
+
+def try_detect_qr_multiple_methods(src: np.ndarray, gray: np.ndarray) -> Tuple:
+    """
+    Thử detect QR code với 3 phương pháp preprocessing khác nhau.
+    Return ngay khi tìm thấy (early exit).
+    
+    Methods (theo thứ tự ưu tiên):
+    1. Gray (CLAHE) - Đã qua CLAHE preprocessing, tăng contrast cục bộ
+    2. Histogram Equalization - Tăng contrast toàn cục, "siêu tương phản"
+    3. Original BGR - Ảnh gốc, không xử lý (fallback cuối cùng)
+    
+    Args:
+        src: Ảnh BGR gốc
+        gray: Ảnh grayscale đã qua CLAHE
+    
+    Returns:
+        (qr_text, qr_points, method_name) or (None, None, None)
+    """
+    qr_detector = cv2.QRCodeDetector()
+    
+    # Danh sách các methods để thử
+    methods = []
+    
+    # Method 1: Gray (CLAHE) - Đã được apply CLAHE ở hàm cha
+    # Đây là best candidate vì CLAHE tăng contrast cục bộ mà không làm méo
+    methods.append(("gray_clahe", gray))
+    
+    # Method 2: Histogram Equalization - "Siêu tương phản"
+    # Tăng contrast toàn cục mạnh, hiệu quả nhưng có thể méo QR
+    enhanced = cv2.equalizeHist(gray)
+    methods.append(("hist_equal", enhanced))
+    
+    # Method 3: Original BGR - Ảnh gốc
+    # Fallback cuối cùng, đôi khi mọi preprocessing đều fail mà BGR lại work
+    methods.append(("original_bgr", src))
+    
+    # Thử từng method, return ngay khi tìm thấy
+    print("  → Trying QR detection with multiple preprocessing methods...")
+    for method_name, img in methods:
+        qr_text, qr_points, _ = qr_detector.detectAndDecode(img)
+        
+        # Debug: In chi tiết kết quả detect
+        print(f"     • Method '{method_name}': text={repr(qr_text)}, points_shape={qr_points.shape if qr_points is not None else 'None'}")
+        
+        # Check có detect được không
+        has_text = qr_text and len(qr_text) > 0
+        has_points = qr_points is not None and qr_points.size > 0
+        
+        if has_text and has_points:
+            # Reshape nếu cần
+            if qr_points.ndim == 3:
+                qr_points = qr_points.reshape(-1, 2)
+            
+            if len(qr_points) >= 4:
+                print(f"  ✓ QR detected with method: {method_name}")
+                # Lưu method thành công
+                save_debug_image(img, f"04_low_qr_success_{method_name}.png", 
+                               cmap='gray' if len(img.shape) == 2 else None)
+                return qr_text, qr_points, method_name
+            else:
+                print(f"     ✗ Points count too low: {len(qr_points)}")
+    
+    # Tất cả methods đều fail
+    print("  ✗ QR detection failed with all methods")
+    
+    # Lưu tất cả failed attempts để debug
+    for method_name, img in methods:
+        save_debug_image(img, f"04_low_qr_failed_{method_name}.png", 
+                       cmap='gray' if len(img.shape) == 2 else None)
+    
+    return None, None, None
+
+
 def detect_with_low_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     """
     Strategy LOW: QR-First + Geometry Inference (cho áo trắng/kem).
     
-    Logic từ C# (đã cập nhật):
-    1. Histogram equalization cho QR detection robustness
-    2. Detect QR trên enhanced image (fallback to original nếu fail)
-    3. Tính geometry QR (vectors, width, height, angle)
-    4. Suy luận label với expansion ratios (4.0x, 3.0x)
-    5. Construct 4 corners (QR ở TRÁI DƯỚI, expand PHẢI + TRÊN)
-    6. Tạo RotatedRect từ 4 corners
+    Logic từ C# (đã cập nhật - CENTER-RIGHT positioning):
+    1. Multi-method QR detection (gray_clahe → hist_equal → original_bgr)
+    2. Tính geometry QR (vectors, width, height, angle)
+    3. Suy luận label với expansion ratios:
+       - Chiều cao: 2.0× QR (QR ở giữa → mở rộng 0.5× lên/xuống)
+       - Chiều rộng: 4.0× QR (QR ở phải → mở rộng 3.0× sang trái)
+    4. Construct 4 corners (QR ở GIỮA-PHẢI, expand TRÁI + TRÊN + DƯỚI)
+    5. Tạo RotatedRect từ 4 corners
     
     Returns:
         tuple: (rect, box, qr_text, None, qr_points)
@@ -573,19 +732,12 @@ def detect_with_low_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     """
     print("  → Method: QR-First + Geometry Inference")
     
-    # 1. Enhance contrast cho QR detection
-    enhanced = cv2.equalizeHist(gray)
-    print("  → Applied histogram equalization for QR detection robustness")
+    # Debug: Lưu ảnh input
+    save_debug_image(gray, "04_low_input_gray.png", cmap='gray')
+    save_debug_image(src, "04_low_input_src.png")
     
-    # 2. Detect QR
-    qr_detector = cv2.QRCodeDetector()
-    
-    # Try on enhanced first
-    qr_text, qr_points, _ = qr_detector.detectAndDecode(enhanced)
-    
-    # Fallback to original
-    if not qr_text:
-        qr_text, qr_points, _ = qr_detector.detectAndDecode(src)
+    # 1. Detect QR với multiple methods
+    qr_text, qr_points, method_used = try_detect_qr_multiple_methods(src, gray)
     
     if not qr_text or qr_points is None or len(qr_points) < 4:
         print("  ✗ No QR code detected")
@@ -616,27 +768,52 @@ def detect_with_low_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     angle_deg = angle_rad * 180.0 / np.pi
     print(f"  → QR geometry: {qr_width:.1f}x{qr_height:.1f} px, angle={angle_deg:.1f}°")
     
-    # 4. Infer label dimensions
-    label_width = qr_width * LABEL_WIDTH_RATIO
-    label_height = qr_height * LABEL_HEIGHT_RATIO
+    # 4. Infer label dimensions and expansion distances
+    # QR ở GIỮA-PHẢI của nhãn → mở rộng TRÁI, LÊN TRÊN, XUỐNG DƯỚI, PHẢI
+    
+    # Tính điểm QR bottom-right (p2)
+    p2 = p3 + (dir_right * qr_width)  # QR bottom-right
+    
+    # Tính padding chung (áp dụng cho tất cả các cạnh)
+    padding_h = qr_height * PADDING_RATIO  # Padding dọc (10% QR height)
+    padding_w = qr_width * PADDING_RATIO   # Padding ngang (10% QR width)
+    
+    # Tính khoảng mở rộng (bao gồm padding chung)
+    expansion_up = qr_height * QR_VERTICAL_CENTER_UP + padding_h        # 1.0× + padding
+    expansion_down = qr_height * QR_VERTICAL_CENTER_DOWN + padding_h    # 1.2× + padding
+    expansion_left = qr_width * QR_LEFT_EXPANSION + padding_w           # 3.5× + padding
+    expansion_right = qr_width * QR_HORIZONTAL_RIGHT + padding_w        # 0.2× + padding
+    
+    # Tính label dimensions
+    label_width = expansion_left + qr_width + expansion_right
+    label_height = expansion_up + qr_height + expansion_down
+    
     print(f"  → Predicted label: {label_width:.1f}x{label_height:.1f} px")
-    print(f"  → Expansion: width={LABEL_WIDTH_RATIO}xQR, height={LABEL_HEIGHT_RATIO}xQR")
+    print(f"  → Base expansion: ↑{QR_VERTICAL_CENTER_UP}×QR, ↓{QR_VERTICAL_CENTER_DOWN}×QR, ←{QR_LEFT_EXPANSION}×QR, →{QR_HORIZONTAL_RIGHT}×QR")
+    print(f"  → Padding: {PADDING_RATIO}×QR = ±{padding_h:.1f}px (vertical), ±{padding_w:.1f}px (horizontal)")
+    print(f"  → Final expansion: ↑{expansion_up:.1f}px, ↓{expansion_down:.1f}px, ←{expansion_left:.1f}px, →{expansion_right:.1f}px")
     
     # 5. Calculate 4 corners
-    # QR ở TRÁI DƯỚI của label → expand PHẢI và LÊN TRÊN
-    qr_top_left = p0
+    # ┌─────────────────────────────────────┐  ← Label top (1.0×QR + 0.1×padding)
+    # │                        ┌────┐       │
+    # │                        │ QR │ ←─────┤  QR gần phải (0.2×QR + 0.1×padding)
+    # │                        └────┘       │
+    # └─────────────────────────────────────┘  ← Label bottom (1.2×QR + 0.1×padding)
+    # ↑                                     ↑
+    # Trái: 3.5×QR + 0.1×padding             Phải: 0.2×QR + 0.1×padding
     
-    # Label top-left: đi lên trên từ QR top-left
-    label_top_left = qr_top_left - dir_down * (label_height - qr_height)
+    # Tính 4 góc nhãn
+    # 1. Label TOP-RIGHT: từ QR top-right (p1) đi lên rồi sang phải
+    label_top_right = p1 - (dir_down * expansion_up) + (dir_right * expansion_right)
     
-    # Label top-right: từ top-left đi sang phải
-    label_top_right = label_top_left + dir_right * label_width
+    # 2. Label BOTTOM-RIGHT: từ QR bottom-right (p2) đi xuống rồi sang phải
+    label_bottom_right = p2 + (dir_down * expansion_down) + (dir_right * expansion_right)
     
-    # Label bottom-left: từ top-left đi xuống
-    label_bottom_left = label_top_left + dir_down * label_height
+    # 3. Label TOP-LEFT: từ top-right đi sang trái
+    label_top_left = label_top_right - (dir_right * label_width)
     
-    # Label bottom-right: từ bottom-left đi sang phải
-    label_bottom_right = label_bottom_left + dir_right * label_width
+    # 4. Label BOTTOM-LEFT: từ bottom-right đi sang trái
+    label_bottom_left = label_bottom_right - (dir_right * label_width)
     
     # 6. Create RotatedRect
     label_center = (label_top_left + label_top_right + 
@@ -651,6 +828,11 @@ def detect_with_low_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
                     label_bottom_right, label_bottom_left], dtype=np.int32)
     
     print(f"  ✓ Label constructed: center=({label_center[0]:.1f},{label_center[1]:.1f}), angle={angle:.1f}°")
+    
+    # Debug: Vẽ geometry visualization
+    debug_low_strategy_geometry(src, qr_points, box, p1, p2, 
+                               label_top_right, label_top_left,
+                               expansion_up, expansion_left)
     
     # qr_points_180 = None (detect trên toàn ảnh, không có ROI cục bộ)
     return (rect, box, qr_text, None, qr_points)
