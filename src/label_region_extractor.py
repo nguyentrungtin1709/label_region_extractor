@@ -12,6 +12,9 @@ import cv2
 import numpy as np
 from dataclasses import dataclass
 from typing import Optional, Tuple
+import matplotlib.pyplot as plt
+from pathlib import Path
+import json
 
 # ============================================================================
 # CONSTANTS (từ C# LabelRegionExtractor.cs)
@@ -25,6 +28,83 @@ EDGE_MAX = 0.1             # Normalization cho edge strength
 # Label expansion ratios (cho Strategy LOW)
 LABEL_WIDTH_RATIO = 4.0    # Giảm từ 9.0 → 4.0
 LABEL_HEIGHT_RATIO = 3.0   # Giữ nguyên 3×
+
+# Debug output directory
+DEBUG_OUTPUT_DIR = "data/debug"
+
+
+# ============================================================================
+# HELPER FUNCTIONS
+# ============================================================================
+
+def get_analysis_region(gray: np.ndarray) -> np.ndarray:
+    """
+    Lấy vùng để phân tích.
+    
+    Trước: Lấy 1/3 center (vì ảnh lớn, nhãn ở giữa)
+    Hiện tại: Lấy toàn bộ ảnh (vì input đã là vùng nhỏ chứa nhãn)
+    
+    Args:
+        gray: Ảnh grayscale
+    
+    Returns:
+        Region để phân tích (toàn bộ ảnh)
+    """
+    return gray
+
+
+def save_debug_image(image: np.ndarray, filename: str, cmap='gray'):
+    """
+    Lưu ảnh debug.
+    
+    Args:
+        image: Ảnh cần lưu
+        filename: Tên file (sẽ tự động thêm prefix debug_)
+        cmap: Colormap cho matplotlib
+    """
+    output_dir = Path(DEBUG_OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_path = output_dir / f"debug_{filename}"
+    
+    if len(image.shape) == 2:  # Grayscale
+        plt.figure(figsize=(10, 6))
+        plt.imshow(image, cmap=cmap)
+        plt.colorbar()
+        plt.title(filename)
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    else:  # Color (BGR -> RGB)
+        plt.figure(figsize=(10, 6))
+        plt.imshow(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+        plt.title(filename)
+        plt.axis('off')
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    print(f"  💾 Saved debug: {output_path}")
+
+
+def save_debug_json(data: dict, filename: str):
+    """
+    Lưu dữ liệu debug dạng JSON.
+    
+    Args:
+        data: Dictionary chứa dữ liệu
+        filename: Tên file (sẽ tự động thêm prefix debug_)
+    """
+    output_dir = Path(DEBUG_OUTPUT_DIR)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    output_path = output_dir / f"debug_{filename}"
+    
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+    
+    print(f"  💾 Saved debug: {output_path}")
 
 
 # ============================================================================
@@ -58,8 +138,8 @@ def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, float]:
     """
     Phân tích histogram để tìm 2 peaks chính và tính separation.
     
-    Logic từ C#:
-    1. Lấy vùng center (1/3 kích thước nhỏ nhất)
+    Logic:
+    1. Lấy vùng phân tích (toàn bộ ảnh)
     2. Tính histogram 256 bins
     3. Smooth bằng moving average 5 bins
     4. Tìm local maxima (> 0.5×avgHeight, cách nhau >30 bins)
@@ -69,16 +149,11 @@ def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, float]:
     Returns:
         (peak1_pos, peak2_pos, separation)
     """
-    # 1. Center region (1/3 min dimension)
-    sample_size = min(gray.shape[1], gray.shape[0]) // 3
-    cx = gray.shape[1] // 2
-    cy = gray.shape[0] // 2
-    x1 = cx - sample_size // 2
-    y1 = cy - sample_size // 2
-    center_roi = gray[y1:y1+sample_size, x1:x1+sample_size]
+    # 1. Lấy vùng phân tích
+    analysis_roi = get_analysis_region(gray)
     
     # 2. Histogram
-    hist = cv2.calcHist([center_roi], [0], None, [256], [0, 256])
+    hist = cv2.calcHist([analysis_roi], [0], None, [256], [0, 256])
     hist = hist.flatten()
     
     # 3. Smooth (moving average 5 bins)
@@ -104,14 +179,39 @@ def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, float]:
     
     # 5. Take 2 highest peaks
     if len(peaks) < 2:
-        return (0, 255, 0.0)
+        peak1, peak2, separation = 0, 255, 0.0
+    else:
+        peaks = sorted(peaks, key=lambda x: x[1], reverse=True)[:2]
+        peaks = sorted(peaks, key=lambda x: x[0])  # Sort by position
+        
+        peak1 = peaks[0][0]
+        peak2 = peaks[1][0]
+        separation = abs(peak2 - peak1) / 255.0
     
-    peaks = sorted(peaks, key=lambda x: x[1], reverse=True)[:2]
-    peaks = sorted(peaks, key=lambda x: x[0])  # Sort by position
+    # Debug: Vẽ histogram với peaks (luôn vẽ dù có peaks hay không)
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.plot(hist, color='gray', alpha=0.5, label='Original')
+    plt.plot(smoothed, color='blue', label='Smoothed')
+    plt.axvline(peak1, color='red', linestyle='--', label=f'Peak1={peak1}')
+    plt.axvline(peak2, color='green', linestyle='--', label=f'Peak2={peak2}')
+    plt.title(f'Histogram Analysis (Separation={separation:.3f})')
+    plt.xlabel('Intensity')
+    plt.ylabel('Frequency')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
     
-    peak1 = peaks[0][0]
-    peak2 = peaks[1][0]
-    separation = abs(peak2 - peak1) / 255.0
+    plt.subplot(1, 2, 2)
+    plt.imshow(analysis_roi, cmap='gray')
+    plt.title('Analysis Region')
+    plt.axis('off')
+    
+    plt.tight_layout()
+    output_path = Path(DEBUG_OUTPUT_DIR) / "debug_01_histogram.png"
+    Path(DEBUG_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  💾 Saved debug: {output_path}")
     
     return (peak1, peak2, separation)
 
@@ -120,8 +220,8 @@ def analyze_edges(gray: np.ndarray) -> Tuple[int, float]:
     """
     Phân tích edges bằng Canny để tính edge strength.
     
-    Logic từ C#:
-    1. Lấy vùng center (1/3 kích thước)
+    Logic:
+    1. Lấy vùng phân tích (toàn bộ ảnh)
     2. Canny(50, 150)
     3. Đếm non-zero pixels
     4. edge_strength = edge_pixels / total_pixels
@@ -129,22 +229,36 @@ def analyze_edges(gray: np.ndarray) -> Tuple[int, float]:
     Returns:
         (edge_pixels, edge_strength)
     """
-    # 1. Center region
-    sample_size = min(gray.shape[1], gray.shape[0]) // 3
-    cx = gray.shape[1] // 2
-    cy = gray.shape[0] // 2
-    x1 = cx - sample_size // 2
-    y1 = cy - sample_size // 2
-    center_roi = gray[y1:y1+sample_size, x1:x1+sample_size]
+    # 1. Lấy vùng phân tích
+    analysis_roi = get_analysis_region(gray)
     
     # 2. Canny Edge Detection
-    edges = cv2.Canny(center_roi, threshold1=50, threshold2=150)
+    edges = cv2.Canny(analysis_roi, threshold1=50, threshold2=150)
     
     # 3. Count edge pixels
     edge_pixels = cv2.countNonZero(edges)
-    total_pixels = center_roi.shape[0] * center_roi.shape[1]
+    total_pixels = analysis_roi.shape[0] * analysis_roi.shape[1]
     
     edge_strength = edge_pixels / total_pixels
+    
+    # Debug: Lưu ảnh edges
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.imshow(analysis_roi, cmap='gray')
+    plt.title('Original Image')
+    plt.axis('off')
+    
+    plt.subplot(1, 2, 2)
+    plt.imshow(edges, cmap='gray')
+    plt.title(f'Canny Edges (Strength={edge_strength:.4f}, {edge_pixels} pixels)')
+    plt.axis('off')
+    
+    plt.tight_layout()
+    output_path = Path(DEBUG_OUTPUT_DIR) / "debug_02_edges.png"
+    Path(DEBUG_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  💾 Saved debug: {output_path}")
     
     return (edge_pixels, edge_strength)
 
@@ -153,29 +267,62 @@ def analyze_contrast(gray: np.ndarray) -> Tuple[float, float, float]:
     """
     Phân tích contrast bằng standard deviation.
     
-    Logic từ C#:
-    1. Lấy vùng center (1/3 kích thước)
+    Logic:
+    1. Lấy vùng phân tích (toàn bộ ảnh)
     2. Tính mean, stddev
     3. contrast_ratio = stddev / 128.0
     
     Returns:
         (mean, stddev, contrast_ratio)
     """
-    # 1. Center region
-    sample_size = min(gray.shape[1], gray.shape[0]) // 3
-    cx = gray.shape[1] // 2
-    cy = gray.shape[0] // 2
-    x1 = cx - sample_size // 2
-    y1 = cy - sample_size // 2
-    center_roi = gray[y1:y1+sample_size, x1:x1+sample_size]
+    # 1. Lấy vùng phân tích
+    analysis_roi = get_analysis_region(gray)
     
     # 2. Calculate mean and stddev
-    mean, stddev = cv2.meanStdDev(center_roi)
+    mean, stddev = cv2.meanStdDev(analysis_roi)
     mean = mean[0][0]
     stddev = stddev[0][0]
     
     # 3. Contrast ratio
     contrast_ratio = stddev / 128.0
+    
+    # Debug: Lưu JSON và visualization
+    contrast_data = {
+        "mean_intensity": float(mean),
+        "stddev_intensity": float(stddev),
+        "contrast_ratio": float(contrast_ratio),
+        "min_intensity": float(np.min(analysis_roi)),
+        "max_intensity": float(np.max(analysis_roi)),
+        "image_shape": list(analysis_roi.shape)
+    }
+    
+    save_debug_json(contrast_data, "03_contrast.json")
+    
+    # Vẽ phân bố cường độ
+    plt.figure(figsize=(12, 6))
+    plt.subplot(1, 2, 1)
+    plt.imshow(analysis_roi, cmap='gray')
+    plt.title(f'Analysis Region (Mean={mean:.1f}, StdDev={stddev:.1f})')
+    plt.colorbar()
+    plt.axis('off')
+    
+    plt.subplot(1, 2, 2)
+    plt.hist(analysis_roi.ravel(), bins=256, range=(0, 256), color='blue', alpha=0.7)
+    plt.axvline(mean, color='red', linestyle='--', label=f'Mean={mean:.1f}')
+    plt.axvline(mean - stddev, color='orange', linestyle=':', label=f'Mean-σ={mean-stddev:.1f}')
+    plt.axvline(mean + stddev, color='orange', linestyle=':', label=f'Mean+σ={mean+stddev:.1f}')
+    plt.title(f'Intensity Distribution (Contrast Ratio={contrast_ratio:.3f})')
+    plt.xlabel('Intensity')
+    plt.ylabel('Frequency')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    output_path = Path(DEBUG_OUTPUT_DIR) / "debug_03_contrast.png"
+    Path(DEBUG_OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    print(f"  💾 Saved debug: {output_path}")
     
     return (mean, stddev, contrast_ratio)
 
@@ -187,7 +334,7 @@ def analyze_frame(gray: np.ndarray) -> ContrastAnalysisResult:
     Logic từ C#:
     1. Gọi 3 hàm phân tích
     2. Normalize edge_strength (min(edge_strength / 0.1, 1.0))
-    3. Final Score = separation×0.4 + edge_strength_norm×0.3 + contrast_ratio×0.3
+    3. Final Score = separationx0.4 + edge_strength_normx0.3 + contrast_ratiox0.3
     4. Phân loại: >0.45=High, 0.25-0.45=Medium, <0.25=Low
     
     Returns:
@@ -240,7 +387,7 @@ def detect_with_high_contrast(src: np.ndarray, gray: np.ndarray,
     
     Logic từ C# (đã cập nhật):
     1. Otsu adaptive threshold thay vì hardcoded value
-    2. Morphology: Open(3×3, 1 iter) → Close(3×3, 2 iters)
+    2. Morphology: Open(3x3, 1 iter) → Close(3x3, 2 iters)
     3. FindContours(EXTERNAL)
     4. Chọn largest contour theo area
     5. MinAreaRect → box
@@ -323,7 +470,7 @@ def detect_with_medium_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     
     Logic từ C# (đã cập nhật):
     1. Canny(30, 100) - Lower thresholds để nhạy hơn
-    2. Morphology: Close(7×7, 3 iters) → Dilate(7×7, 1 iter)
+    2. Morphology: Close(7x7, 3 iters) → Dilate(7x7, 1 iter)
     3. FindContours(EXTERNAL)
     4. Filter CHỈ theo area ratio (5-80%)
     5. Sort theo area (lớn nhất trước)
@@ -416,7 +563,7 @@ def detect_with_low_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     1. Histogram equalization cho QR detection robustness
     2. Detect QR trên enhanced image (fallback to original nếu fail)
     3. Tính geometry QR (vectors, width, height, angle)
-    4. Suy luận label với expansion ratios (4.0×, 3.0×)
+    4. Suy luận label với expansion ratios (4.0x, 3.0x)
     5. Construct 4 corners (QR ở TRÁI DƯỚI, expand PHẢI + TRÊN)
     6. Tạo RotatedRect từ 4 corners
     
@@ -467,13 +614,13 @@ def detect_with_low_contrast(src: np.ndarray, gray: np.ndarray) -> Tuple:
     
     angle_rad = np.arctan2(top_vec[1], top_vec[0])
     angle_deg = angle_rad * 180.0 / np.pi
-    print(f"  → QR geometry: {qr_width:.1f}×{qr_height:.1f} px, angle={angle_deg:.1f}°")
+    print(f"  → QR geometry: {qr_width:.1f}x{qr_height:.1f} px, angle={angle_deg:.1f}°")
     
     # 4. Infer label dimensions
     label_width = qr_width * LABEL_WIDTH_RATIO
     label_height = qr_height * LABEL_HEIGHT_RATIO
-    print(f"  → Predicted label: {label_width:.1f}×{label_height:.1f} px")
-    print(f"  → Expansion: width={LABEL_WIDTH_RATIO}×QR, height={LABEL_HEIGHT_RATIO}×QR")
+    print(f"  → Predicted label: {label_width:.1f}x{label_height:.1f} px")
+    print(f"  → Expansion: width={LABEL_WIDTH_RATIO}xQR, height={LABEL_HEIGHT_RATIO}xQR")
     
     # 5. Calculate 4 corners
     # QR ở TRÁI DƯỚI của label → expand PHẢI và LÊN TRÊN
@@ -524,7 +671,7 @@ def detect_label_region(src: np.ndarray,
     Phát hiện vùng nhãn trong ảnh.
     
     Logic từ C# (flow chính xác):
-    1. Preprocessing: BGR → Gray → GaussianBlur(5×5)
+    1. Preprocessing: BGR → Gray → GaussianBlur(5x5)
     2. TẦNG 1: Phân tích (AnalyzeFrame) → ContrastAnalysisResult
     3. Log analysis metrics
     4. TẦNG 2: Routing theo level:

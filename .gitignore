@@ -15,10 +15,8 @@ env/
 *.swp
 *.swo
 
-# Test files
-test_images/
-
 # Project specific
-data/results/*.jpg
-data/results/*.png
+data/results/*.*
+data/debug/*.*
+
 *.log
