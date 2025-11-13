@@ -1,12 +1,19 @@
 """
 Test Script - Label Region Extractor
 Chạy detection trên ảnh và hiển thị kết quả
+
+Usage:
+    python main.py <input_image> <output_image>
+    
+Example:
+    python main.py data/test_images/test.jpg data/results/output.jpg
 """
 
 import cv2
 import numpy as np
 from pathlib import Path
 import sys
+import argparse
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -85,12 +92,36 @@ def visualize_result(src: np.ndarray, result: tuple) -> np.ndarray:
     return vis
 
 
-def main():
+def main(input_image=None, output_dir=None):
     """Test detection trên ảnh mẫu."""
     
-    # Cấu hình
-    image_path = "data/test_images/test.jpg"
-    output_path = "data/results/output.jpg"
+    # Nếu không truyền tham số, parse từ command line
+    if input_image is None:
+        parser = argparse.ArgumentParser(
+            description='Label Region Extractor - Detect and extract label regions from images',
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""
+Examples:
+    python main.py data/test_images/test.jpg data/results
+    python main.py input.png output_folder
+        """
+        )
+        parser.add_argument('input_image', type=str, help='Path to input image')
+        parser.add_argument('output_dir', type=str, nargs='?', default='data/results', 
+                          help='Output directory (default: data/results)')
+        
+        args = parser.parse_args()
+        
+        image_path = args.input_image
+        output_directory = args.output_dir
+    else:
+        # Sử dụng tham số được truyền vào
+        image_path = input_image
+        output_directory = output_dir if output_dir else 'data/results'
+    
+    # Tạo tên file output từ tên file input
+    input_filename = Path(image_path).stem  # Lấy tên file không có extension
+    output_path = Path(output_directory) / f"output_{input_filename}.png"
     
     print("=" * 70)
     print("LABEL REGION EXTRACTOR - TEST SCRIPT")
@@ -103,7 +134,7 @@ def main():
     
     if src is None:
         print(f"❌ Cannot load image: {image_path}")
-        print(f"   Please place a test image at: {Path(image_path).absolute()}")
+        print(f"   File not found or invalid format")
         return
     
     print(f"✅ Loaded image: {src.shape[1]}×{src.shape[0]} px")
@@ -119,17 +150,10 @@ def main():
     vis = visualize_result(src, result)
     
     # Save result
-    output_dir = Path(output_path).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(output_path, vis)
-    print(f"✅ Saved result to: {Path(output_path).absolute()}")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(output_path), vis)
+    print(f"✅ Saved result to: {output_path.absolute()}")
     print()
-    
-    # Display
-    print("👁️  Displaying result (press any key to close)...")
-    cv2.imshow("Detection Result", vis)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
     
     print()
     print("=" * 70)
@@ -138,4 +162,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main("data/test_images/20251113_104730_176_guide-box.png", "data/results")
