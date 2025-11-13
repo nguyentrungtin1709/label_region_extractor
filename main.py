@@ -162,4 +162,4 @@ Examples:
 
 
 if __name__ == "__main__":
-    main("data/test_images/20251113_104730_176_guide-box.png", "data/results")
+    main("data/test_images/002-white-guide-box.png", "data/results")

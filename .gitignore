@@ -16,7 +16,7 @@ env/
 *.swo
 
 # Project specific
-data/results/*.*
-data/debug/*.*
+data/results/*
+data/debug/*
 
 *.log

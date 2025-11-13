@@ -142,7 +142,7 @@ def analyze_histogram(gray: np.ndarray) -> Tuple[int, int, float]:
     1. Lấy vùng phân tích (toàn bộ ảnh)
     2. Tính histogram 256 bins
     3. Smooth bằng moving average 5 bins
-    4. Tìm local maxima (> 0.5×avgHeight, cách nhau >30 bins)
+    4. Tìm local maxima (> 0.5 avgHeight, cách nhau >30 bins)
     5. Chọn 2 peaks cao nhất, sort theo position
     6. separation = |peak2 - peak1| / 255.0
     
